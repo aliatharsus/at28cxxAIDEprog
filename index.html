@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EEPROM Serial Interface</title>
+  <style>
+    body {
+      background: #121212;
+      color: #eeeeee;
+      font-family: monospace;
+      padding: 20px;
+    }
+    h1 { color: #4fc3f7; }
+    label, select, button, input[type="file"] {
+      font-size: 16px;
+      margin: 8px 6px;
+      padding: 8px;
+    }
+    #monitor {
+      background: #1e1e1e;
+      color: #00e676;
+      white-space: pre-wrap;
+      padding: 10px;
+      height: 400px;
+      overflow-y: scroll;
+      border: 1px solid #444;
+    }
+    .btn { background: #4fc3f7; color: black; border: none; cursor: pointer; }
+    .btn:disabled { background: #666; cursor: not-allowed; }
+    table { border-collapse: collapse; margin-top: 10px; }
+    td, th { border: 1px solid #555; padding: 6px; }
+    input.hex-input { width: 60px; background: #222; color: #eee; border: 1px solid #555; padding: 4px; }
+    #testSection { margin-top: 20px; padding: 10px; border: 1px solid #444; }
+  </style>
+</head>
+<body>
+  <h1>EEPROM Terminal</h1>
+
+  <label for="romSelect">EEPROM Size:</label>
+  <select id="romSelect">
+    <option value="8192">AT28C64 (8KB)</option>
+    <option value="16384">AT28C128 (16KB)</option>
+    <option value="32768">AT28C256 (32KB)</option>
+  </select>
+
+  <button class="btn" onclick="connectSerial()">Connect</button>
+  <button class="btn" onclick="disconnectSerial()">Disconnect</button>
+  <button class="btn" onclick="sendReadCommand()">Read</button>
+  <button class="btn" onclick="clearMonitor()">Clear</button>
+
+  <input type="file" id="fileInput" accept=".bin" />
+  <button class="btn" id="writeBtn" onclick="uploadBinFile()">Write .bin</button>
+  <button class="btn" onclick="debugPrint()">DEBUGPP</button>
+
+  <div style="margin-top: 20px;">
+  <h3>Fill EEPROM</h3>
+  <label for="fillByte">Hex Byte:</label>
+  <input id="fillByte" class="hex-input" placeholder="EA" maxlength="2">
+  <button class="btn" onclick="fillEEPROM()">Fill</button>
+  </div>
+
+<div style="display: flex; gap: 40px; margin-top: 20px;">
+  <div id="addrWriteSection">
+    <h3>Write Byte to Specific Address</h3>
+    <input id="addrInput" class="hex-input" maxlength="4" placeholder="Address (e.g. 1A2B)">
+    <input id="dataInput" class="hex-input" maxlength="2" placeholder="Data (e.g. FF)">
+    <button class="btn" onclick="writeByteToAddress()">Write Byte</button>
+  </div>
+
+  <div id="addrReadSection">
+    <h3>Read Byte from Specific Address</h3>
+    <input id="readAddrInput" class="hex-input" maxlength="4" placeholder="Address (e.g. 1A2B)">
+    <button class="btn" onclick="readByteFromAddress()">Read Byte</button>
+  </div>
+</div>
+
+
+  <pre id="monitor"></pre>
+
+  <script>
+    let port, writer, reader, readLoopAbort;
+
+    async function connectSerial() {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+        log("✅ Connected\n");
+        readLoopAbort = false;
+        readLoop();
+      } catch (err) {
+        log("❌ Failed to connect: " + err + "\n");
+      }
+    }
+    async function fillEEPROM() {
+  const hexStr = document.getElementById("fillByte").value.trim();
+  if (!/^[\da-fA-F]{1,2}$/.test(hexStr)) {
+    alert("Enter a valid hex byte (00–FF)");
+    return;
+  }
+
+  const value = parseInt(hexStr, 16);
+  const romSize = document.getElementById("romSelect").value;
+  const command = `FILL:${romSize}\n`;
+
+  try {
+    log("📤 Sending: " + command);
+    await writer.write(new TextEncoder().encode(command));
+
+    // Give Arduino a bit of time to switch modes
+    await new Promise(r => setTimeout(r, 300));
+
+    //log(`📤 Sending filler byte: 0x${hexStr.toUpperCase()}\n`);
+    await writer.write(new Uint8Array([value]));
+
+    //log("⏳ Waiting for fill...\n");
+    // Optional: wait for "FILL_COMPLETE" message if implemented
+    // await waitForMessage("FILL_COMPLETE");
+    //log("✅ Fill command sent!\n");
+  } catch (err) {
+    log("❌ Fill failed: " + err + "\n");
+  }
+  }
+  async function writeByteToAddress() {
+  const addrHex = document.getElementById("addrInput").value.trim();
+  const dataHex = document.getElementById("dataInput").value.trim();
+
+  if (!/^[0-9a-fA-F]{1,4}$/.test(addrHex)) {
+    return alert("Invalid address (must be 1-4 hex digits)");
+  }
+  if (!/^[0-9a-fA-F]{1,2}$/.test(dataHex)) {
+    return alert("Invalid byte (must be 1-2 hex digits)");
+  }
+
+  const addr = parseInt(addrHex, 16);
+  const data = parseInt(dataHex, 16);
+
+  const addrL = addr & 0xFF;
+  const addrH = (addr >> 8) & 0xFF;
+
+  try {
+    // Send mode command first
+    const romSize = document.getElementById("romSelect").value;
+    const cmd = `ADWR:${romSize}\n`;
+    await writer.write(new TextEncoder().encode(cmd));
+    //log("📤 Sending ADWRITE command\n");
+
+    // Delay for Arduino to switch modes
+    await new Promise(r => setTimeout(r, 300));
+
+    // Send 3 bytes: addr_L, addr_H, data
+    await writer.write(new Uint8Array([addrL, addrH, data]));
+    //log(`📤 Sent to address 0x${addr.toString(16)}: 0x${data.toString(16)}\n`);
+  } catch (err) {
+    //log("❌ Error: " + err + "\n");
+  }
+  }
+    async function debugPrint() {
+      try {
+        const cmd = `DEBUG\n`;
+        await writer.write(new TextEncoder().encode(cmd));
+        //log("📤 Sending DEBUG command\n");
+
+      } catch (err) {
+        log("⚠️ Error DEBUGGING: " + err + "\n");
+      }
+    }
+
+  async function readByteFromAddress() {
+  const addrHex = document.getElementById("readAddrInput").value.trim();
+
+  if (!/^[0-9a-fA-F]{1,4}$/.test(addrHex)) {
+    return alert("Invalid address (must be 1-4 hex digits)");
+  }
+
+  const addr = parseInt(addrHex, 16);
+  const addrL = addr & 0xFF;
+  const addrH = (addr >> 8) & 0xFF;
+
+  try {
+    const romSize = document.getElementById("romSelect").value;
+    const cmd = `ADRD:${romSize}\n`;
+    await writer.write(new TextEncoder().encode(cmd));
+    //log("📤 Sending ADRD command\n");
+
+    await new Promise(r => setTimeout(r, 300)); // Give time for mode change
+
+    await writer.write(new Uint8Array([addrL, addrH]));
+    //log(`📤 Sent address: 0x${addr.toString(16).padStart(4, '0')}\n`);
+
+    // Await the Arduino's reply (via the normal read loop)
+    //log("⏳ Waiting for response...\n");
+  } catch (err) {
+    log("❌ Error during read: " + err + "\n");
+  }
+}
+
+
+    async function disconnectSerial() {
+      try {
+        readLoopAbort = true;
+        reader?.cancel();
+        writer?.releaseLock();
+        await port.close();
+        log("❌ Disconnected\n");
+      } catch (err) {
+        log("⚠️ Error disconnecting: " + err + "\n");
+      }
+    }
+
+    async function sendReadCommand() {
+      const romSize = document.getElementById("romSelect").value;
+      const command = `READ:${romSize}\n`;
+      await writer.write(new TextEncoder().encode(command));
+      //log("📤 Sent: " + command);
+    }
+
+    async function testCommand() {
+      const romSize = document.getElementById("romSelect").value;
+      const command = `WRITE:${romSize}\n`;
+      //log("📤 Sending test command: " + command);
+      await writer.write(new TextEncoder().encode(command));
+      //log("⏳ Waiting for response...\n");
+    }
+
+    async function testSingleByte() {
+      const romSize = document.getElementById("romSelect").value;
+      
+      try {
+        // Send command
+        const command = `WRITE:${romSize}\n`;
+        //log("📤 Sending: " + command);
+        await writer.write(new TextEncoder().encode(command));
+        
+        // Wait a bit for Arduino to process
+        await new Promise(r => setTimeout(r, 500));
+        
+        // Send single byte
+        //log("📤 Sending single byte: 0xAA\n");
+        await writer.write(new Uint8Array([0x2B]));
+        
+        // Wait for response
+        //log("⏳ Waiting for write confirmation...\n");
+        
+      } catch (err) {
+        log("❌ Test failed: " + err + "\n");
+      }
+    }
+
+    async function uploadBinFile() {
+      const file = document.getElementById("fileInput").files[0];
+      if (!file) return alert("Please select a .bin file");
+
+      const romSize = parseInt(document.getElementById("romSelect").value);
+      if (file.size > romSize) return alert("File too large for selected EEPROM");
+
+      const arrayBuffer = await file.arrayBuffer();
+      const data = new Uint8Array(arrayBuffer);
+      
+      document.getElementById("writeBtn").disabled = true;
+      
+      try {
+        const command = `WRITE:${romSize}\n`;
+        //log("📤 Sending: " + command);
+        await writer.write(new TextEncoder().encode(command));
+        
+        // Wait for ready signal
+        //log("⏳ Waiting for READY_TO_WRITE...\n");
+        //await waitForMessage("READY_TO_WRITE");
+        
+        log("📤 Sending " + data.length + " bytes...\n");
+        
+        // Send data one byte at a time with delays
+        for (let i = 2; i < data.length; i++) {   //here the 2 is written because the first two bytes of bin file are .org 0000 but the programmer doesnt handle that
+          await writer.write(new Uint8Array([data[i]]));
+          
+          // Wait longer between bytes
+          await new Promise(r => setTimeout(r, 50));
+          
+          if (i % 10 === 0) {
+            log(`📊 Sent ${i}/${data.length} bytes\n`);
+          }
+        }
+        
+        //log("⏳ Waiting for completion...\n");
+        //await waitForMessage("WRITE_COMPLETE");
+        log("✅ Upload complete!\n");
+        
+      } catch (err) {
+            //log("❌ Upload failed: " + err + "\n");
+      } finally {
+        document.getElementById("writeBtn").disabled = false;
+      }
+    }
+
+    async function waitForMessage(expectedMessage) {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          window.messageWaiter = null;
+          reject(new Error(`Timeout waiting for: ${expectedMessage}`));
+        }, 15000);
+        
+        window.messageWaiter = (msg) => {
+          if (msg.includes(expectedMessage)) {
+            clearTimeout(timeout);
+            window.messageWaiter = null;
+            resolve(msg);
+          }
+        };
+      });
+    }
+
+    async function readLoop() {
+      const decoder = new TextDecoder();
+      while (port.readable && !readLoopAbort) {
+        try {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            const msg = decoder.decode(value);
+            log(msg);
+            if (window.messageWaiter) window.messageWaiter(msg);
+          }
+        } catch (err) {
+          if (!readLoopAbort) log("❌ Read error: " + err + "\n");
+          break;
+        }
+      }
+    }
+
+    function clearMonitor() {
+      document.getElementById("monitor").textContent = "";
+    }
+
+    function log(msg) {
+      const monitor = document.getElementById("monitor");
+      monitor.textContent += msg;
+      monitor.scrollTop = monitor.scrollHeight;
+    }
+
+    // Add initial row by default
+    window.onload = () => {
+      addHexRow();
+      // Pre-fill with test value
+      setTimeout(() => {
+        const input = document.querySelector(".hex-input");
+        if (input) input.value = "AA";
+      }, 100);
+    };
+  </script>
+</body>
+</html>
