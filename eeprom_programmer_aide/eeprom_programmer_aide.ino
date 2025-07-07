@@ -13,7 +13,7 @@ const int dataPins[8] = {23, 22, 16, 32, 33, 25, 26, 27};
 #define AT28C64 8192
 #define AT28C256 32768
 
-enum Mode { IDLE, WRITING, READING, FILLING, ADWRITING, ADREADING};
+enum Mode { IDLE, ORG_WAIT, WRITING, READING, FILLING, ADWRITING, ADREADING };
 Mode mode = IDLE;
 uint16_t romSize = AT28C64;
 uint16_t addr = 0;
@@ -21,6 +21,9 @@ String input = "";
 
 bool fillFlag=0;
 byte filler=0xEA;
+
+bool noOrg=0;
+bool writeFlagOrg=0;
 
 bool adwriteFlag=0;
 
@@ -82,15 +85,12 @@ void loop() {
           romSize = input.substring(6).toInt();
           Serial.print("Extracted romSize: ");
           Serial.println(romSize);
-          
           if (romSize == 8192 || romSize == 32768 || romSize == 16384) {
-            addr = 0;
             dataConfig(WRITE);
-            mode = WRITING;
+            addr=0;
+            mode = ORG_WAIT;
+            Serial.println("WAITING_FOR_ORG");
             lastWriteTime = millis();
-            Serial.println("READY_TO_WRITE");
-            Serial.print("Switched to WRITING mode, romSize=");
-            Serial.println(romSize);
           } else {
             Serial.print("ERROR: Invalid romSize: ");
             Serial.println(romSize);
@@ -144,46 +144,48 @@ void loop() {
       }
     }
   }
-  if (mode == WRITING) {
-    if (Serial.available()) {
-      uint8_t byte = Serial.read();
+    if (mode == ORG_WAIT) {
+    if (Serial.available() >= 2) {
+      uint8_t low = Serial.read();
+      uint8_t high = Serial.read();
+      addr = low | (high << 8);
       lastWriteTime = millis();
-      
-      Serial.print(addr,HEX);
-      Serial.print(" : ");
-      Serial.println(byte,HEX);
-      
-      if (addr < romSize) {
-        writeByte(addr, byte);
-        addr++;
-        
-//        Serial.print("WROTE_BYTE:");
-//        Serial.print(addr-1);
-//        Serial.print(":");
-//        Serial.println(byte, HEX);
-        
-        if (addr >= romSize) {
-          mode = IDLE;
-          dataConfig(READ);
-          Serial.println("WRITE_COMPLETE");
-          Serial.print("Write complete, total bytes: ");
-          Serial.println(addr);
-        }
-      } else {
-        Serial.println("ERROR: Address exceeds ROM size");
-        mode = IDLE;
-        dataConfig(READ);
-      }
+      mode = WRITING;
+      Serial.print("ORG_SET: ");
+      Serial.println(addr, HEX);
     } else {
-      if (millis() - lastWriteTime > writeTimeout) {
-        Serial.print("TIMEOUT: Only wrote ");
-        Serial.print(addr);
-        Serial.println(" bytes");
-        mode = IDLE;
-        dataConfig(READ);
+      if (millis() - lastWriteTime > 3000) {
+        Serial.println("ORG_TIMEOUT, writing at 0x0000");
+        addr = 0;
+        mode = WRITING;
       }
     }
   }
+
+  if (mode == WRITING) {
+  if (Serial.available()) {
+    uint8_t byte = Serial.read();
+    lastWriteTime = millis();
+
+    Serial.print(addr, HEX);
+    Serial.print(" : ");
+    Serial.println(byte, HEX);
+
+    if (addr < romSize) {
+      writeByte(addr, byte);
+      addr++;
+    } else {
+      Serial.println("ERROR: Addr exceeds ROM size");
+      mode = IDLE;
+      dataConfig(READ);
+    }
+  } else if (millis() - lastWriteTime > writeTimeout) {
+    Serial.println("WRITE_TIMEOUT");
+    mode = IDLE;
+    dataConfig(READ);
+  }
+}
+
   if (mode == READING) {
     const uint8_t bytesPerLine = 8;
 

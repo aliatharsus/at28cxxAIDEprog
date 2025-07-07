@@ -273,7 +273,7 @@
         log("📤 Sending " + data.length + " bytes...\n");
         
         // Send data one byte at a time with delays
-        for (let i = 2; i < data.length; i++) {   //here the 2 is written because the first two bytes of bin file are .org 0000 but the programmer doesnt handle that
+        for (let i = 0; i < data.length; i++) {   //here the 2 is written because the first two bytes of bin file are .org 0000 but the programmer doesnt handle that
           await writer.write(new Uint8Array([data[i]]));
           
           // Wait longer between bytes
